@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import numpy as np
 
 _SEVERITY_SCALE = {1: 0.2, 2: 0.4, 3: 0.6, 4: 0.8, 5: 1.0}
