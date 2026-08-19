@@ -1,0 +1,13 @@
+# Core (required)
+torch>=2.0
+numpy>=1.24
+matplotlib>=3.7
+
+# Real medical data (optional but recommended: MedMNIST v2)
+medmnist>=3.0
+
+# Only needed for --arch resnet18
+torchvision>=0.15
+
+# Dev
+pytest>=7.4

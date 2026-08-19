@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
+      - name: Unit tests
+        run: pytest tests/ -q
+      - name: End-to-end smoke run
+        run: |
+          python -m umi.cli run-all --dataset synthetic --n-train-synthetic 400 \
+            --epochs 2 --n-members 2 --n-samples 5 --out runs/ci --no-maps
+          test -f runs/ci/REPORT.md
