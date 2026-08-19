@@ -1,0 +1,2 @@
+[console_scripts]
+umi = umi.cli:main

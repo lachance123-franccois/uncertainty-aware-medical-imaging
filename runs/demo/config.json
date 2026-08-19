@@ -1,0 +1,29 @@
+{
+  "dataset": "synthetic",
+  "data_root": "./data",
+  "image_size": 28,
+  "arch": "smallcnn",
+  "width": 32,
+  "p_drop": 0.3,
+  "epochs": 14,
+  "batch_size": 128,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "label_smoothing": 0.0,
+  "optimizer": "adamw",
+  "scheduler": "cosine",
+  "early_stopping_patience": 8,
+  "seed": 0,
+  "augment": true,
+  "num_workers": 0,
+  "evidential_kind": "mse",
+  "annealing_epochs": 10,
+  "lambda_max": 1.0,
+  "n_members": 3,
+  "n_classes": 2,
+  "in_channels": 1,
+  "class_names": [
+    "normal",
+    "lesion"
+  ]
+}
