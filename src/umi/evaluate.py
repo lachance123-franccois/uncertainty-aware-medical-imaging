@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
 from .calibration import calibration_report
 from .data import ArrayDataset, make_shifted_testset
 from .methods import Predictor
@@ -18,6 +21,7 @@ from .viz import (
     plot_risk_coverage,
     plot_uncertainty_separation,
 )
+
 HEADLINE_METRICS = ["accuracy", "ece", "misclassification_auroc", "aurc", "nll"]
 
 RELATIVE_COST = {  # forward passes per prediction, relative to one model

@@ -48,6 +48,7 @@ def evidence_from_logits(logits: torch.Tensor, activation: str = "softplus") -> 
 
 import math
 
+
 def kl_dirichlet_uniform(alpha: torch.Tensor) -> torch.Tensor:
     k = alpha.shape[-1]
     s_alpha = alpha.sum(dim=-1, keepdim=True)
