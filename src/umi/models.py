@@ -102,5 +102,10 @@ def enable_mc_dropout(model: nn.Module) -> int:
             if getattr(module, "p", 0.0) > 0.0:
                 module.train()
                 n += 1
+    if n == 0:
+        raise RuntimeError(
+            "No active dropout layers found (p_drop = 0): MC Dropout needs "
+            "p_drop > 0 at training time, otherwise every forward pass is identical."
+        )
 
     return n
