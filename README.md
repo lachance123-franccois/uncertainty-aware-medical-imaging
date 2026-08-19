@@ -1,435 +1,299 @@
 # Do you know when you don't know? Uncertainty quantification for medical imaging
 
-[![tests](https://github.com/USERNAME/REPO/actions/workflows/tests.yml/badge.svg)](https://github.com/USERNAME/REPO/actions/workflows/tests.yml)
+[![tests](https://github.com/USERNAME/REPO/actions/workflows/tests.yml/badge.svg)](https://github.com/lachance123-franccois/uncertainty-aware-medical-imaging/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-A neural network classifier always answers. Show it a blurred, badly exposed or
-simply unusual chest X-ray and softmax will still report *"92% pneumonia"* — the
-model is confident **and** wrong, and nothing in its output distinguishes that
-case from a textbook one. In a clinical decision-support tool that is not a
-performance problem, it is a safety problem: the radiologist has no way to know
-which predictions to double-check.
+Version française : [README.fr.md](README.fr.md)
 
-This repository implements and **compares four ways of getting a trustworthy
-uncertainty estimate** out of a medical image classifier, and then — the part
-that actually matters — **measures whether those uncertainties can be believed**.
+A neural network classifier always answers. Show it a blurred, badly exposed or
+simply unusual chest X ray and softmax will still report a probability of 0.92
+for pneumonia while being wrong. The model is confident and incorrect, and
+nothing in its output separates that case from a textbook one. In a clinical
+decision support tool this is not a performance problem but a safety problem:
+the radiologist has no way to know which predictions deserve a second look.
+
+This repository implements and compares four ways of extracting a trustworthy
+uncertainty estimate from a medical image classifier, then measures whether
+those uncertainties can be believed.
 
 ```bash
 pip install -e ".[data]"
-python -m umi.cli run-all --dataset pneumoniamnist --epochs 25
-# -> runs/exp1/REPORT.md + figures/
+python -m umi.cli run-all --dataset pneumoniamnist --epochs 25 --n-members 5
 ```
 
----
+## 1. The four strategies
 
-## 1. The four methods
-
-| Method | Idea in one line | Training cost | Inference cost | Epistemic uncertainty? |
-|---|---|---|---|---|
-| **Baseline softmax** | Max softmax probability as "confidence" | 1× | 1 pass | ❌ structurally impossible |
-| **+ Temperature scaling** | Divide logits by a scalar `T` fitted on validation | 1× | 1 pass | ❌ (but well calibrated) |
-| **MC Dropout** | Keep dropout **on at test time**, average `S` stochastic passes | 1× | `S` passes | ✅ from dropout noise |
-| **Deep Ensembles** | Train `M` independent networks, average them | `M`× | `M` passes | ✅ from init/SGD noise |
-| **Evidential DL** | Predict a **Dirichlet** over the simplex, not a point | 1× | **1 pass** | ✅ in closed form |
+| Method | Idea | Training cost | Inference cost | Epistemic uncertainty |
+|:---|:---|:---|:---|:---|
+| Softmax baseline | Maximum softmax probability as confidence | 1x | 1 pass | Structurally impossible |
+| Temperature scaling | Divide logits by a scalar fitted on validation | 1x | 1 pass | Structurally impossible |
+| MC Dropout | Keep dropout active at test time, average S passes | 1x | S passes | From dropout noise |
+| Deep Ensembles | Train M independent networks and average them | Mx | M passes | From initialisation and SGD noise |
+| Evidential DL | Predict a Dirichlet over the simplex, not a point | 1x | 1 pass | Closed form |
 
 Temperature scaling is included on purpose. It is the cheapest possible
-baseline, and any honest comparison has to check whether a 5-model ensemble
+competitor, and an honest comparison has to check whether a five model ensemble
 really beats one scalar fitted in two seconds.
 
 ### MC Dropout
 
-Dropout is normally a training-only regulariser. Leaving it active at inference
+Dropout is normally a training only regulariser. Leaving it active at inference
 turns each forward pass into a sample from an approximate posterior over
-weights: `S` passes over the *same* image give `S` slightly different
-predictions, and their spread is the uncertainty.
+weights, so S passes over the same image give S slightly different predictions
+whose spread estimates the uncertainty.
 
-```python
-model.eval()                      # deterministic norm layers ...
-enable_mc_dropout(model)          # ... but dropout stays stochastic
-probs = torch.stack([softmax(model(x)) for _ in range(30)])   # (S, B, K)
-```
-
-Two implementation details make the difference between a working MC Dropout and
-a decorative one, and both are handled in [`models.py`](src/umi/models.py):
-
-* **Dropout is placed after every block**, not only before the classifier.
-  Final-layer-only dropout perturbs almost nothing and badly underestimates
-  epistemic uncertainty.
-* **GroupNorm instead of BatchNorm.** With BatchNorm you must re-enable dropout
-  *only*, or batch statistics leak between the samples and the uncertainty
-  becomes a function of who else is in the batch.
+Two implementation details separate a working MC Dropout from a decorative one.
+Dropout is placed after every convolutional block rather than only before the
+classifier, since final layer dropout perturbs almost nothing and badly
+underestimates epistemic uncertainty. GroupNorm replaces BatchNorm so the
+normalisation layers stay deterministic while dropout keeps sampling; with
+BatchNorm the batch statistics would leak between samples and the uncertainty
+would depend on batch composition.
 
 ### Deep Ensembles
 
-`M` networks, same data, different random seeds — different initialisation,
-different shuffling, different augmentation draws. Where the members agree the
-prediction is safe; where they diverge the input is outside the region the data
-constrained. No bagging: Lakshminarayanan et al. showed random restarts alone
-suffice, and subsampling the training set usually hurts each member.
+M networks, same data, different random seeds, hence different initialisation,
+different shuffling and different augmentation draws. Where the members agree
+the prediction is safe, where they diverge the input lies outside the region
+constrained by the data. No bagging is used: random restarts alone provide the
+diversity, and subsampling the training set usually weakens each member.
 
 ### Evidential Deep Learning
 
-Rather than a probability vector, the network outputs **evidence**
-`e = softplus(z)` parameterising a Dirichlet:
+The network outputs non negative evidence, which parameterises a Dirichlet:
 
-$$\alpha_k = e_k + 1,\qquad S=\sum_k \alpha_k,\qquad \hat p_k = \frac{\alpha_k}{S},\qquad u = \frac{K}{S}$$
+$$\alpha_k = \mathrm{softplus}(z_k) + 1, \qquad S = \sum_k \alpha_k, \qquad \hat p_k = \frac{\alpha_k}{S}, \qquad u = \frac{K}{S}$$
 
-The model predicts a *distribution over probability vectors*. The **vacuity**
-`u = K/S` goes to 1 when the network has collected no evidence at all — the
-literal statement *"I have never seen anything like this"*, which softmax cannot
-represent because its outputs are forced to sum to one no matter how alien the
-input. Training minimises the Bayes risk of the Brier score (or of
-cross-entropy) under the Dirichlet, plus a KL term that pushes the evidence of
-the **wrong** classes back to uniform:
-
-$$\mathcal{L} = \underbrace{\sum_k (y_k - \hat p_k)^2 + \frac{\hat p_k(1-\hat p_k)}{S+1}}_{\text{fit + variance}} + \underbrace{\lambda_t\, \mathrm{KL}\big(\mathrm{Dir}(\tilde\alpha)\,\|\,\mathrm{Dir}(\mathbf{1})\big)}_{\text{penalise misleading evidence}}$$
-
-The KL weight `λ_t` is annealed from 0 over the first ~10 epochs. Ramp it too
-fast and all evidence collapses to zero: the model becomes uniformly, uselessly
-uncertain. That single hyper-parameter is the main practical difficulty of the
-method, and [`losses.py`](src/umi/losses.py) documents it.
-
----
+The vacuity u tends to one when the network has collected no evidence at all.
+It is the literal statement of ignorance, which softmax cannot represent because
+its outputs are forced to sum to one however alien the input. Training minimises
+the Bayes risk of the Brier score under the Dirichlet plus a KL term that pushes
+the evidence of wrong classes back to uniform, with a weight annealed from zero
+over the first ten epochs. That schedule is the main practical difficulty:
+ramping it too fast collapses all evidence to zero and the model becomes
+uniformly, uselessly uncertain.
 
 ## 2. Three flavours of uncertainty
 
-Every method is reduced to the **same three numbers** so the comparison is
-apples-to-apples ([`uncertainty.py`](src/umi/uncertainty.py)):
+Every method is reduced to the same three numbers so the comparison is fair.
 
-| Quantity | Formula | Clinical reading |
-|---|---|---|
-| **Total** | $H[\bar p]$ | "How unsure am I overall?" |
-| **Aleatoric** | $\mathbb{E}_\theta H[p_\theta]$ | Irreducible image ambiguity → *get another modality* |
-| **Epistemic** | $I[y;\theta] = H[\bar p] - \mathbb{E}_\theta H[p_\theta]$ | Model ignorance → *this case is unlike my training data, do not trust me* |
+| Quantity | Definition | Clinical reading |
+|:---|:---|:---|
+| Total | Entropy of the mean prediction | How unsure am I overall |
+| Aleatoric | Mean of the entropies | Irreducible image ambiguity, get another modality |
+| Epistemic | Total minus aleatoric, the mutual information | Model ignorance, this case is unlike my training data |
 
-The split matters. A faint, genuinely ambiguous nodule and a corrupted scan from
-an unseen scanner both produce high total uncertainty, but they call for
-different actions. For the evidential model the same decomposition is available
-in closed form via digamma functions, and it is validated against a Monte-Carlo
-estimate in the test suite.
+For the evidential model the same decomposition is available in closed form via
+digamma functions, and the test suite validates it against a Monte Carlo
+estimate.
 
----
+## 3. How trust is measured
 
-## 3. Is the uncertainty *trustworthy*? — calibration
+Calibration asks whether the confidence number is true on average. The Expected
+Calibration Error bins predictions by confidence and measures the weighted gap
+between accuracy and confidence. Adaptive ECE, MCE, class wise ECE, Brier score
+and negative log likelihood complete the picture.
 
-Producing an uncertainty number is easy; producing an *honest* one is the
-research question. A model is **calibrated** if among the cases it calls with
-80% confidence it is right 80% of the time.
+Calibration alone is not enough, since a model can be calibrated on average and
+still be unable to say which individual case is wrong. The repository therefore
+also measures misclassification AUROC, a Mann and Whitney test, and the risk
+versus coverage curve with its area AURC, which answers the deployment question
+directly: what error rate remains once the most uncertain cases are deferred to
+a human reader.
 
-**Reliability diagram** — bin predictions by confidence, plot empirical accuracy
-against mean confidence. Perfect calibration follows the diagonal; bars below it
-mean over-confidence, the dangerous direction.
+Finally, every method is evaluated under seven realistic acquisition failures at
+five severities: Gaussian noise, Poisson noise, blur, contrast loss,
+overexposure, occlusion and resolution loss. The desirable signature is simple.
+Accuracy falls and uncertainty rises together.
 
-**ECE** (Expected Calibration Error), the scalar summary:
+## 4. Results on PneumoniaMNIST
 
-$$\mathrm{ECE} = \sum_{m=1}^{M} \frac{|B_m|}{n}\,\bigl|\mathrm{acc}(B_m) - \mathrm{conf}(B_m)\bigr|$$
+Chest X ray pneumonia versus normal, 4708 training images, 624 test images,
+25 epochs, 5 ensemble members, 30 MC samples, CPU only.
 
-[`calibration.py`](src/umi/calibration.py) also implements **adaptive ECE**
-(equal-mass bins — the version to quote when confidences pile up near 1.0 and
-equal-width bins sit empty), **MCE** (worst bin, the number a safety reviewer
-asks for), **class-wise ECE** (top-label ECE hides a badly calibrated rare
-class), plus Brier and NLL, which are proper scoring rules and cannot be gamed.
+### Calibration and decision quality
 
-Calibration alone is not enough, though: a model can be perfectly calibrated on
-average and still be unable to tell you *which individual case* is wrong. So
-[`metrics.py`](src/umi/metrics.py) adds the operational tests:
-
-* **Misclassification AUROC** — how well uncertainty ranks errors above correct
-  predictions. 0.5 = the uncertainty is decorative.
-* **Mann-Whitney U + point-biserial r** — the statistical claim that
-  misclassified cases have higher uncertainty, with a p-value.
-* **Risk-coverage curve / AURC** — sort by uncertainty, defer the most uncertain
-  `1-c` fraction to a human, plot the error rate on the rest. This *is* the
-  deployment story: *"at 80% coverage the error rate drops from 8% to 2%, and
-  20% of cases go to a radiologist."*
-* **Shift detection AUROC** — can uncertainty alone separate clean images from
-  corrupted ones?
-
----
-
-## 4. Stress test: distribution shift
-
-Clean test accuracy hides everything interesting, so every method is also
-evaluated under seven realistic acquisition failures at five severities
-([`corruptions.py`](src/umi/corruptions.py)): Gaussian noise, Poisson (low-dose)
-noise, blur, contrast loss, over-exposure, occlusion, and pixelation.
-
-The desirable signature is simple: **accuracy falls *and* uncertainty rises**.
-A flat uncertainty curve as accuracy collapses is the confidently-wrong failure
-mode this whole project exists to detect.
-
----
-
-## 5. Where in the image is the model unsure?
-
-For segmentation you get a per-pixel distribution for free. For classification
-there is one distribution per image, so the spatial map is built by
-intervention — **occlusion sensitivity applied to the uncertainty**
-([`maps.py`](src/umi/maps.py)): slide a patch over the image, blank it out, and
-record how the predictive uncertainty changes.
-
-* **Red** — hiding this region makes the model unsure: it carried the evidence.
-* **Blue** — hiding it makes the model *more* confident: it contained
-  distracting or contradictory signal (an artefact, a marker, an overlap).
-
-`pixelwise_uncertainty()` is included so the identical analysis transfers to a
-segmentation task (e.g. BraTS tumour masks) with no occlusion at all — just move
-the class axis last and reuse the same decomposition.
-
----
-
-## 6. Results
-
-The tables below come from `runs/demo/REPORT.md` on the **built-in synthetic
-lesion dataset** (3 000 train / 1 000 test images, 14 epochs, 3-member ensemble,
-20 MC samples, ~15 min on a laptop CPU). They are reproduced verbatim by:
-
-```bash
-python -m umi.cli run-all --dataset synthetic --n-train-synthetic 3000 \
-    --epochs 14 --n-members 3 --n-samples 20 --out runs/demo
-```
-
-Every method lands at the same accuracy (0.869 ± 0.001), which is the point:
-**the accuracy column cannot distinguish these models — everything that matters
-is in the columns to its right.** The Bayes ceiling is ~0.87 by construction
-(25% of the positives carry a deliberately near-invisible lesion), so all four
-models are essentially optimal classifiers and differ only in what they *say
-about themselves*.
-
-Full auto-generated output: [`assets/example_REPORT.md`](assets/example_REPORT.md).
-
-### Calibration (clean test set)
-
-| Method | accuracy | ECE ↓ | adaptive ECE ↓ | MCE ↓ | class-wise ECE ↓ | Brier ↓ | NLL ↓ | over-confidence |
-|---|---|---|---|---|---|---|---|---|
-| Baseline softmax | 0.870 | 0.0284 | 0.0372 | 0.461 | 0.0291 | 0.200 | 0.313 | +0.003 |
-| + Temperature scaling | 0.871 | 0.0359 | 0.0380 | **0.087** | 0.0399 | 0.207 | 0.326 | −0.003 |
-| MC Dropout | 0.869 | 0.0407 | 0.0493 | 0.236 | 0.0410 | 0.200 | 0.315 | −0.020 |
-| **Deep Ensemble** | 0.870 | **0.0178** | **0.0264** | 0.406 | **0.0181** | 0.205 | 0.319 | −0.013 |
-| Evidential DL | 0.870 | 0.0421 | 0.0505 | 0.085 | 0.0421 | 0.212 | 0.353 | −0.025 |
+| Method | Accuracy | ECE | Misclassification AUROC | AURC | NLL |
+|:---|:---|:---|:---|:---|:---|
+| Softmax baseline | 0.8478 | 0.0948 | 0.7811 | 0.0561 | 0.4670 |
+| Temperature scaling | 0.8478 | 0.0997 | 0.7811 | 0.0561 | 0.4868 |
+| MC Dropout | 0.8333 | 0.0785 | 0.7939 | 0.0587 | 0.4396 |
+| Deep Ensemble | **0.8718** | 0.0647 | **0.8111** | **0.0397** | 0.3762 |
+| Evidential DL | 0.8397 | **0.0583** | 0.8080 | 0.0548 | **0.3740** |
 
 ![reliability](assets/reliability_all.png)
 
-### Does the uncertainty find the errors?
+Evidential DL delivers the best calibration and the best likelihood for the
+price of a single forward pass, a 38 percent ECE reduction over the baseline.
+Deep Ensembles dominate everything related to the decision itself, cutting AURC
+by 29 percent, at the cost of five full trainings. The plain softmax baseline is
+the worst calibrated configuration in the study.
 
-| Method | miscls. AUROC ↑ | point-biserial r | AURC ↓ | risk @ 80% coverage ↓ | mean *u* (errors) | mean *u* (correct) |
-|---|---|---|---|---|---|---|
-| **Baseline softmax** | **0.799** | 0.322 | **0.040** | **0.084** | 0.740 | 0.414 |
-| MC Dropout | 0.789 | 0.325 | 0.042 | 0.083 | 0.810 | 0.464 |
-| Deep Ensemble | 0.764 | 0.305 | 0.046 | 0.096 | 0.780 | 0.444 |
-| + Temperature scaling | 0.733 | 0.293 | 0.051 | 0.103 | 0.722 | 0.418 |
-| Evidential DL | 0.691 | 0.297 | 0.058 | 0.118 | 0.715 | 0.587 |
+### Temperature scaling fails here
 
-All five Mann-Whitney tests give p < 1e-15: misclassified images really do carry
-higher uncertainty for every method. Deferring the 20% most uncertain cases cuts
-the error rate from 13% to 8.4%.
+The fitted factor is T = 0.939. A value below one sharpens the logits and raises
+confidence, and the ECE degrades from 0.0948 to 0.0997.
 
-![risk-coverage](assets/risk_coverage.png)
+The cause is structural. Validation accuracy reaches 0.947 while test accuracy
+is 0.848, a ten point gap, because PneumoniaMNIST draws its validation split
+from the training patients and its test split from different patients. The model
+is slightly underconfident on validation and overconfident on test, so the
+correction is applied in the wrong direction. Post hoc calibration fitted on
+internal data does not transport outside its distribution, which is precisely
+the clinical situation.
 
-**Nothing beats plain softmax entropy here**, and that is worth saying out loud
-rather than hiding. On clean, in-distribution data where the errors are
-*aleatoric* — genuinely ambiguous lesions — the softmax probability already
-carries that information. Epistemic machinery has nothing to add, because
-there is no epistemic problem to solve.
+### Under distribution shift the ranking inverts
 
-### Distribution shift — where it all changes
+| Method | Accuracy, severity 0 | Accuracy, severity 5 | Uncertainty, severity 0 | Uncertainty, severity 5 |
+|:---|:---|:---|:---|:---|
+| Softmax baseline | 0.848 | 0.510 | 0.244 | 0.879 |
+| Temperature scaling | 0.848 | 0.510 | 0.228 | 0.867 |
+| MC Dropout | 0.833 | **0.630** | 0.302 | **0.911** |
+| Deep Ensemble | 0.872 | 0.540 | 0.236 | 0.893 |
+| Evidential DL | 0.840 | 0.431 | 0.390 | 0.630 |
 
 ![shift](assets/shift_gaussian_noise.png)
 
-| Method | sev 0 | sev 1 | sev 3 | sev 5 |
-|---|---|---|---|---|
-| Baseline softmax | 0.870 / 0.456 | 0.807 / 0.503 | 0.603 / 0.353 | 0.517 / **0.236** |
-| MC Dropout | 0.869 / 0.509 | 0.813 / 0.550 | 0.564 / 0.415 | 0.509 / **0.281** |
-| + Temperature scaling | 0.871 / 0.457 | 0.793 / 0.471 | 0.583 / 0.316 | 0.513 / **0.204** |
-| Deep Ensemble | 0.870 / 0.488 | 0.864 / 0.493 | 0.803 / 0.553 | 0.751 / 0.759 |
-| Evidential DL | 0.870 / 0.604 | 0.865 / 0.605 | 0.853 / 0.618 | 0.779 / 0.670 |
-
-*Cells are `accuracy / mean total uncertainty` under Gaussian noise.*
-
-This is the result the project exists to produce. As the noise increases, the
-baseline collapses to chance (0.870 → 0.517) **and its uncertainty goes
-down** — 0.456 → 0.236. The model becomes maximally, confidently wrong exactly
-when it should be screaming for help; its ECE rises from 0.03 to **0.43**. MC
-Dropout shows the same pathology: sampling from a posterior the network never
-learned to widen does not create knowledge it does not have.
-
-Deep Ensembles and Evidential DL degrade the way a safe system should —
-uncertainty *rises* (0.49 → 0.76 and 0.60 → 0.67), accuracy holds far better,
-and ECE stays under 0.08 across the whole severity range.
+MC Dropout becomes the most robust method: best preserved accuracy and the
+uncertainty that rises highest. Evidential DL collapses, falling below the
+majority class rate while its uncertainty barely moves, because vacuity is
+capped by the amount of evidence the KL schedule taught the network to emit. The
+same failure appears on the synthetic control dataset, so it is a property of
+the formulation rather than an experimental artefact.
 
 ### Cost
 
-| Method | train | inference | measured inference time (1 000 images) |
-|---|---|---|---|
-| Baseline / + temperature | 1× | 1 pass | 0.75 s |
-| Evidential DL | 1× | **1 pass** | 0.79 s |
-| Deep Ensemble (M=3) | **3×** | 3 passes | 2.23 s |
-| MC Dropout (S=20) | 1× | 20 passes | 14.46 s |
+| Method | Training | Inference | Measured on 624 images |
+|:---|:---|:---|:---|
+| Baseline, temperature scaling, evidential | 1x | 1 pass | about 2 s |
+| Deep Ensemble with 5 members | 5x | 5 passes | about 6 s |
+| MC Dropout with 30 samples | 1x | 30 passes | about 35 s |
 
 ![cost](assets/cost_vs_calibration.png)
 
-### So which method should you use?
+### Which method should you use
 
-**It depends entirely on which failure you are protecting against — and the
-honest answer is not "the most expensive one".**
+No method dominates. In distribution, Evidential DL gives the best calibration
+per unit of compute and Deep Ensembles the best decisions. Out of distribution,
+MC Dropout is the most robust and Evidential DL the least reliable.
 
-* **In-distribution, ambiguous cases** → plain softmax entropy is already the
-  best error detector (AUROC 0.799). Adding MC Dropout costs 20× the inference
-  and *lowers* it slightly. If your deployment is genuinely narrow and
-  controlled, spend nothing.
-* **Anything might be off-distribution** (new scanner, new site, degraded
-  acquisition — i.e. real clinical deployment) → the baseline is actively
-  dangerous, and MC Dropout does not fix it. Use a **Deep Ensemble** if you can
-  afford `M` trainings: best ECE (0.018), best class-wise ECE, and accuracy that
-  holds up under shift.
-* **You cannot afford `M` trainings, or you need real-time inference** →
-  **Evidential DL** delivers most of the robustness for the price of one forward
-  pass. It costs 18× less inference than MC Dropout while behaving far better
-  under shift. Its weakness is in-distribution ranking (AUROC 0.691) and it is
-  the most sensitive to hyper-parameters — the KL annealing schedule needs care.
-* **MC Dropout** is the awkward one here: 20× inference cost for no measurable
-  calibration gain and no shift robustness. It stays the right first thing to
-  *try*, because it costs one line of code on a model you already trained, but
-  this experiment does not support treating it as a substitute for ensembling.
+For a tightly controlled deployment where production data resembles training
+data, the softmax baseline with a properly validated temperature is enough. For
+an open environment where out of distribution inputs are likely, Deep Ensembles
+are the safest choice when the training budget allows, and MC Dropout an
+acceptable fallback applicable to an already trained model. Evidential DL offers
+the best calibration to cost ratio but should not be deployed without a
+complementary detection mechanism.
 
-**MC Dropout is not enough** — but not for the reason the cost table suggests.
-It is not enough because dropout noise approximates a posterior over weights
-that a network trained with plain cross-entropy never actually widened away from
-the data. Deep Ensembles get diversity from genuinely different optimisation
-trajectories; Evidential DL gets it from an objective that is *trained* to
-report the absence of evidence. Those are structural advantages, and no amount
-of sampling recovers them.
-
-### Reading the figures
+The synthetic control makes the point sharper. On data where errors are
+aleatoric by construction and no shift exists, the plain baseline obtains the
+best ECE of all methods, 0.0242 against 0.0356 for evidential. Where there is no
+ignorance to measure, epistemic machinery buys nothing.
 
 ![errors](assets/uncertainty_split.png)
 
-Overlapping histograms would mean the uncertainty cannot flag errors; the red
-(error) mass sitting to the right of the blue (correct) mass is what a useful
+Overlapping histograms would mean the uncertainty cannot flag errors. The red
+error mass sitting to the right of the blue correct mass is what a useful
 uncertainty looks like.
 
-![maps](assets/map_grid_evidential.png)
-
-Occlusion uncertainty maps on the synthetic lesions. The red blob lands exactly
-on the lesion in the positive cases: masking it destroys the evidence and the
-model becomes unsure. The negative cases show diffuse, low-amplitude maps —
-there is no single region carrying the decision, which is itself the correct
-answer.
-
----
-
-## 7. Install
+## 5. Installation
 
 ```bash
 git clone https://github.com/USERNAME/REPO.git
 cd REPO
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[data,dev]"        # data = medmnist + torchvision
+pip install -e ".[data,dev]"
 ```
 
-CPU is fine: the default backbone is a ~300k-parameter CNN specifically so that
-training five ensemble members stays a coffee-break job.
+CPU is enough: the default backbone has about 300k parameters so that training
+five ensemble members stays a coffee break job. If no download is available,
+everything runs on a built in synthetic lesion dataset whose Bayes error rate is
+known by construction, 25 percent of the positives carrying a deliberately low
+contrast lesion.
 
-No download available? Everything runs on a built-in **synthetic lesion
-dataset** with a known Bayes error rate — 25% of the positives get a
-deliberately low-contrast lesion, so irreducible aleatoric uncertainty exists by
-construction and you can check that the models actually find it.
-
-## 8. Usage
+## 6. Usage
 
 ```bash
-# Everything end to end: train 4 models, evaluate, plot, write the report
 python -m umi.cli run-all --dataset pneumoniamnist --epochs 25 --n-members 5
-
-# No download, ~2 minutes, proves the pipeline works
-python -m umi.cli run-all --dataset synthetic --epochs 3 --n-members 2 --out runs/smoke
-
-# One method at a time
-python -m umi.cli train    --method deep_ensemble --n-members 5 --out runs/exp1
+python -m umi.cli run-all --dataset synthetic --epochs 3 --out runs/smoke
+python -m umi.cli train --method deep_ensemble --n-members 5 --out runs/exp1
 python -m umi.cli evaluate --out runs/exp1 --uncertainty epistemic --corruption blur
-python -m umi.cli maps     --out runs/exp1 --method evidential --n-images 8
-
-# Other datasets: breastmnist | dermamnist | octmnist | bloodmnist | synthetic
+python -m umi.cli maps --out runs/exp1 --method evidential --n-images 8
 ```
 
-Useful flags: `--n-samples` (MC Dropout passes), `--p-drop`, `--evidential-kind
-{mse,digamma}`, `--annealing-epochs`, `--severities 1 2 3 4 5`,
-`--uncertainty {total,aleatoric,epistemic}`, `--arch {smallcnn,resnet18}`.
+Datasets: pneumoniamnist, breastmnist, dermamnist, octmnist, bloodmnist,
+synthetic. Users of an IDE can run `scripts/run_demo.py` directly, which calls
+the CLI with hardcoded arguments and needs no command line.
 
-Each run writes:
+Each run writes REPORT.md with tables and conclusions, results.json with every
+metric, predictions.npz with probabilities and uncertainties, config.json with
+the exact hyperparameters, plus checkpoints and figures.
 
-```
-runs/exp1/
-├── REPORT.md              # tables + auto-generated conclusions
-├── results.json           # every metric, machine readable
-├── predictions.npz        # probs + uncertainties, for your own analysis
-├── config.json            # exact hyper-parameters
-├── checkpoints/           # baseline/ deep_ensemble/ evidential/
-└── figures/               # reliability, risk-coverage, shift, maps
-```
-
-## 9. Repository layout
+## 7. Repository layout
 
 ```
 src/umi/
-├── data.py           MedMNIST loaders + synthetic lesion generator
-├── corruptions.py    7 acquisition-failure shifts, 5 severities
-├── models.py         SmallCNN / ResNet18 + enable_mc_dropout()
-├── losses.py         Cross-entropy + evidential (MSE / digamma) + KL annealing
-├── methods.py        Baseline | MC Dropout | Deep Ensemble | Evidential
-├── uncertainty.py    Total / aleatoric / epistemic, Dirichlet vacuity
-├── calibration.py    ECE, adaptive ECE, MCE, Brier, NLL, temperature scaling
-├── metrics.py        Misclassification AUROC, risk-coverage/AURC, Mann-Whitney
-├── maps.py           Occlusion-based spatial uncertainty maps
-├── viz.py            Reliability diagrams, overlays, comparison plots
-├── train.py          Training loop, ensembles, checkpointing
-├── evaluate.py       Orchestration + REPORT.md generation
-└── cli.py            train | evaluate | maps | run-all
-tests/                48 tests: calibration maths, Dirichlet identities, pipeline
+  data.py           MedMNIST loaders and synthetic lesion generator
+  corruptions.py    seven acquisition shifts at five severities
+  models.py         SmallCNN, ResNet18 and enable_mc_dropout
+  losses.py         cross entropy and evidential losses with KL annealing
+  methods.py        the four predictors behind one interface
+  uncertainty.py    total, aleatoric, epistemic and Dirichlet vacuity
+  calibration.py    ECE variants, Brier, NLL, temperature scaling
+  metrics.py        misclassification AUROC, risk coverage, Mann and Whitney
+  maps.py           occlusion based spatial uncertainty maps
+  viz.py            reliability diagrams, overlays, comparison plots
+  train.py          training loop, ensembles, checkpointing
+  evaluate.py       orchestration and report generation
+  cli.py            train, evaluate, maps, run-all
+tests/              49 tests covering the maths and the pipeline
+article/            LaTeX report of the study
 ```
 
-The test suite is not decoration: it checks the Dirichlet closed forms against
-Monte-Carlo estimates, that temperature scaling recovers a known scaling factor,
-that a perfectly calibrated synthetic population gets ECE ≈ 0, and that
-epistemic uncertainty is exactly zero for a deterministic model and large for
-confidently disagreeing ensemble members.
+The test suite is not decoration. It checks the Dirichlet closed forms against
+Monte Carlo estimates, that temperature scaling recovers a known scaling factor,
+that a perfectly calibrated synthetic population gets an ECE near zero, and that
+epistemic uncertainty is exactly zero for a deterministic model.
 
-```bash
-make test    # pytest tests/ -q
-make lint    # ruff
-make smoke   # 2-minute end-to-end run
-```
+## 8. A bug worth documenting
 
-## 10. Honest limitations
+An early set of results showed the baseline and its temperature scaled version
+with different accuracies, 0.8478 against 0.8349. Temperature scaling is a
+strictly monotone transformation of the logits and cannot change the predicted
+class, so the two values had to be identical.
 
-* **MedMNIST is 28×28.** Conclusions about *ranking* the methods transfer
-  reasonably; absolute ECE values on full-resolution DICOM will differ. Use
-  `--arch resnet18 --image-size 64` for a heavier setting.
-* **One seed is not a result.** Ensemble size and dropout rate both move ECE by
-  more than the gap between methods on small datasets;
-  `scripts/reproduce.sh` runs the pipeline across three seeds for that reason.
-* **Occlusion maps are an approximation.** They answer "which region carries the
-  evidence", not "which pixel is uncertain". Only a segmentation model gives the
-  latter directly.
-* **Calibration is measured in-distribution and under synthetic shift.** Real
-  scanner/site shift is harsher than added Gaussian noise.
-* **Nothing here is a medical device.** This is a methods study.
+The cause was that predictors shared the same network object in memory, and the
+MC Dropout predictor put the dropout layers back into stochastic mode without
+ever restoring them. Any deterministic predictor evaluated afterwards inherited
+active dropout. The fix reasserts evaluation mode on every batch, and a
+regression test now guards it.
 
-## 11. References
+The lesson generalises. The most dangerous errors raise no exception, they
+produce plausible numbers. Only a known invariant, here the mandatory equality
+of two accuracies, exposes them.
 
-1. Gal & Ghahramani (2016). *Dropout as a Bayesian Approximation.* ICML.
-2. Lakshminarayanan, Pritzel & Blundell (2017). *Simple and Scalable Predictive
-   Uncertainty Estimation using Deep Ensembles.* NeurIPS.
-3. Sensoy, Kaplan & Kandemir (2018). *Evidential Deep Learning to Quantify
-   Classification Uncertainty.* NeurIPS.
-4. Guo, Pleiss, Sun & Weinberger (2017). *On Calibration of Modern Neural
-   Networks.* ICML.
-5. Ovadia et al. (2019). *Can You Trust Your Model's Uncertainty?* NeurIPS.
-6. Kendall & Gal (2017). *What Uncertainties Do We Need in Bayesian Deep
-   Learning for Computer Vision?* NeurIPS.
-7. Yang et al. (2023). *MedMNIST v2.* Scientific Data.
+## 9. Limitations
+
+MedMNIST is 28 by 28, so the relative ranking of methods probably transports but
+absolute ECE values on full resolution images will differ. A single seed was
+used for the baseline, and part of the apparent ensemble advantage may come from
+initialisation variance, so a three seed repetition is needed before treating
+small gaps as significant. Occlusion maps answer which region carries the
+evidence, not which pixel is uncertain. The shifts remain synthetic, and real
+scanner or site shift is harsher than added Gaussian noise. Nothing here is a
+medical device.
+
+## 10. References
+
+1. Gal and Ghahramani. Dropout as a Bayesian Approximation. ICML 2016.
+2. Lakshminarayanan, Pritzel and Blundell. Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles. NeurIPS 2017.
+3. Sensoy, Kaplan and Kandemir. Evidential Deep Learning to Quantify Classification Uncertainty. NeurIPS 2018.
+4. Guo, Pleiss, Sun and Weinberger. On Calibration of Modern Neural Networks. ICML 2017.
+5. Ovadia et al. Can You Trust Your Model's Uncertainty? NeurIPS 2019.
+6. Kendall and Gal. What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision? NeurIPS 2017.
+7. Yang et al. MedMNIST v2. Scientific Data 2023.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
