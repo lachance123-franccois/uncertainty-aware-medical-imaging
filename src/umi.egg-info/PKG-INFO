@@ -5,7 +5,6 @@ Summary: Uncertainty quantification for medical image classification: MC Dropout
 License: MIT
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
-License-File: LICENSE
 Requires-Dist: torch>=2.0
 Requires-Dist: numpy>=1.24
 Requires-Dist: matplotlib>=3.7
@@ -15,7 +14,6 @@ Requires-Dist: torchvision>=0.15; extra == "data"
 Provides-Extra: dev
 Requires-Dist: pytest>=7.4; extra == "dev"
 Requires-Dist: ruff>=0.5; extra == "dev"
-Dynamic: license-file
 
 # Do you know when you don't know? Uncertainty quantification for medical imaging
 
